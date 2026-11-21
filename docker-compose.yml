@@ -1,0 +1,17 @@
+services:
+  waybill-app:
+    build: .
+    image: waybill-recon:1.0.0
+    container_name: waybill-recon
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./data:/data
+    environment:
+      WAYBILL_DB_PATH: /data/waybills.db
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/stats')"]
+      interval: 10s
+      timeout: 3s
+      retries: 5

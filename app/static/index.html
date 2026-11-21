@@ -1,0 +1,291 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>联运改单对账演示</title>
+<style>
+  :root { --line:#d7dde5; --bg:#f4f6f9; --blue:#2563eb; --red:#dc2626;
+          --green:#16a34a; --amber:#d97706; --muted:#6b7280; }
+  * { box-sizing: border-box; }
+  body { margin:0; font-family: "PingFang SC","Microsoft YaHei",system-ui,sans-serif;
+         background:var(--bg); color:#1f2937; }
+  header { background:#111827; color:#fff; padding:14px 24px; display:flex;
+           align-items:center; gap:16px; flex-wrap:wrap; }
+  header h1 { font-size:18px; margin:0; }
+  header .stat { font-size:13px; color:#cbd5e1; }
+  main { max-width:1180px; margin:20px auto; padding:0 16px; display:grid;
+         grid-template-columns:1fr 1fr; gap:16px; }
+  .card { background:#fff; border:1px solid var(--line); border-radius:10px;
+          padding:16px; }
+  .card.full { grid-column:1 / -1; }
+  h2 { font-size:15px; margin:0 0 12px; }
+  label { font-size:13px; color:#374151; display:block; margin:8px 0 4px; }
+  input, textarea, select { width:100%; padding:7px 9px; border:1px solid var(--line);
+          border-radius:6px; font-size:13px; font-family:inherit; }
+  textarea { min-height:64px; resize:vertical; }
+  button { cursor:pointer; border:0; border-radius:6px; padding:8px 14px;
+           font-size:13px; font-weight:600; }
+  .primary { background:var(--blue); color:#fff; }
+  .ghost { background:#e5e7eb; color:#1f2937; }
+  .row { display:flex; gap:8px; align-items:center; margin-bottom:6px; }
+  .row input { flex:1; }
+  .row .w { width:110px; flex:none; }
+  .row button { padding:6px 10px; background:#fee2e2; color:var(--red); }
+  .mini { padding:5px 9px; font-size:12px; background:#ecfdf5; color:var(--green);
+          border:1px solid #a7f3d0; margin-top:8px; }
+  .mini.gray { background:#f3f4f6; color:#374151; border-color:var(--line); }
+  table { width:100%; border-collapse:collapse; font-size:13px; }
+  th, td { border-bottom:1px solid var(--line); padding:7px 8px; text-align:left;
+           vertical-align:top; }
+  th { color:var(--muted); font-weight:600; background:#f9fafb; }
+  .badge { display:inline-block; padding:2px 8px; border-radius:999px; font-size:12px; }
+  .b-active, .b-applied { background:#dcfce7; color:var(--green); }
+  .b-replaced, .b-rejected { background:#fee2e2; color:var(--red); }
+  .b-suspended { background:#fef3c7; color:var(--amber); }
+  .reason { color:var(--red); font-size:12px; margin-top:2px; }
+  .muted { color:var(--muted); font-size:12px; }
+  #toast { position:fixed; right:20px; bottom:20px; max-width:420px; padding:12px 16px;
+           border-radius:8px; color:#fff; font-size:13px; display:none; z-index:50;
+           box-shadow:0 6px 18px rgba(0,0,0,.25); white-space:pre-wrap; }
+  #toast.ok { background:var(--green); } #toast.err { background:var(--red); }
+  .toolbar { display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-bottom:10px; }
+  .toolbar select { width:auto; }
+  .batches { font-size:12px; color:#374151; }
+  .newblock { border:1px dashed var(--line); border-radius:8px; padding:10px;
+              margin-bottom:10px; background:#fafbfc; }
+  .newblock h3 { font-size:13px; margin:0 0 6px; display:flex; justify-content:space-between; }
+  code { background:#f3f4f6; padding:1px 5px; border-radius:4px; font-size:12px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>联运改单对账演示</h1>
+  <span class="stat" id="statline">加载中…</span>
+  <span style="flex:1"></span>
+  <button class="ghost" onclick="refreshAll()">刷新</button>
+  <button class="primary" onclick="downloadCsv()">下载对账 CSV（仅有效单）</button>
+</header>
+
+<main>
+  <!-- 原单录入 -->
+  <section class="card">
+    <h2>① 录入原单</h2>
+    <label>运单号</label>
+    <input id="wb-no" placeholder="例如 W001" />
+    <label>各货批整数公斤数</label>
+    <div id="wb-batches"></div>
+    <button class="mini gray" onclick="addBatchRow('wb-batches')">+ 货批</button>
+    <div style="margin-top:14px"><button class="primary" onclick="submitWaybill()">提交原单</button></div>
+    <p class="muted" style="margin-top:10px">同号重复录入会被拒绝；补齐挂起包等待的旧单后会自动续办。</p>
+  </section>
+
+  <!-- 改单包 -->
+  <section class="card">
+    <h2>② 提交改单包（拆单 / 并单）</h2>
+    <label>改单包号</label>
+    <input id="pkg-no" placeholder="例如 P1" />
+    <label>旧单号（每行一个）</label>
+    <textarea id="pkg-old" placeholder="W001&#10;W002"></textarea>
+    <label>新单（逐货批重量合计须与旧单完全一致）</label>
+    <div id="pkg-news"></div>
+    <button class="mini gray" onclick="addNewWaybill()">+ 新单</button>
+    <div style="margin-top:14px"><button class="primary" onclick="submitPackage()">整包提交</button></div>
+    <p class="muted" style="margin-top:10px">同包号同内容重传沿用原结果；异内容拒收。校验未通过会在下方“改单包”列表给出原因。</p>
+  </section>
+
+  <!-- 运单列表 -->
+  <section class="card full">
+    <h2>③ 运单台账</h2>
+    <div class="toolbar">
+      <select id="wb-filter" onchange="renderWaybills()">
+        <option value="">全部</option>
+        <option value="active">仅有效 active</option>
+        <option value="replaced">仅已替换 replaced</option>
+      </select>
+      <span class="muted">有效单总重量（按货批）见右上角统计</span>
+    </div>
+    <table>
+      <thead><tr><th>运单号</th><th>状态</th><th>货批（批号: kg）</th>
+        <th>总重 kg</th><th>来源包</th><th>被替换于</th></tr></thead>
+      <tbody id="wb-tbody"></tbody>
+    </table>
+  </section>
+
+  <!-- 改单包列表 -->
+  <section class="card full">
+    <h2>④ 改单包处理结果（挂起 / 拒收原因）</h2>
+    <div class="toolbar">
+      <select id="pkg-filter" onchange="renderPackages()">
+        <option value="">全部</option>
+        <option value="applied">已生效 applied</option>
+        <option value="suspended">挂起 suspended</option>
+        <option value="rejected">拒收 rejected</option>
+      </select>
+      <span class="muted">页面每 5 秒自动刷新一次</span>
+    </div>
+    <table>
+      <thead><tr><th>包号</th><th>状态</th><th>旧单</th><th>新单</th><th>原因 / 说明</th>
+        <th>内容指纹</th></tr></thead>
+      <tbody id="pkg-tbody"></tbody>
+    </table>
+  </section>
+</main>
+
+<div id="toast"></div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+let waybills = [], packages = [];
+
+function esc(s) {
+  return String(s ?? "").replace(/[&<>"']/g, c =>
+    ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;" }[c]));
+}
+function toast(msg, ok) {
+  const t = $("toast");
+  t.textContent = msg; t.className = ok ? "ok" : "err"; t.style.display = "block";
+  clearTimeout(t._timer);
+  t._timer = setTimeout(() => t.style.display = "none", 4500);
+}
+
+// ---------- 动态表单 ----------
+function addBatchRow(containerId, batchNo = "", weight = "") {
+  const div = document.createElement("div");
+  div.className = "row";
+  div.innerHTML =
+    `<input placeholder="货批号" value="${esc(batchNo)}" class="bno">` +
+    `<input class="w bw" type="number" min="1" step="1" placeholder="kg" value="${esc(weight)}">` +
+    `<button type="button">删</button>`;
+  div.querySelector("button").onclick = () => div.remove();
+  $(containerId).appendChild(div);
+}
+function addNewWaybill(no = "", batches = []) {
+  const wrap = document.createElement("div");
+  wrap.className = "newblock";
+  const bid = "nb-" + Math.random().toString(36).slice(2, 9);
+  wrap.innerHTML =
+    `<h3><span>新运单</span><button type="button" class="mini gray del-wb">移除该单</button></h3>` +
+    `<input class="nno" placeholder="新运单号" value="${esc(no)}">` +
+    `<div class="nb-batches" id="${bid}"></div>` +
+    `<button type="button" class="mini gray add-b">+ 货批</button>`;
+  wrap.querySelector(".del-wb").onclick = () => wrap.remove();
+  wrap.querySelector(".add-b").onclick = () => addBatchRow(bid);
+  $("pkg-news").appendChild(wrap);
+  if (batches.length) batches.forEach(b => addBatchRow(bid, b.batch_no, b.weight_kg));
+  else addBatchRow(bid);
+}
+
+// ---------- 提交 ----------
+function collectBatches(container) {
+  return [...container.querySelectorAll(".row")].map(r => ({
+    batch_no: r.querySelector(".bno").value.trim(),
+    weight_kg: Number(r.querySelector(".bw").value),
+  })).filter(b => b.batch_no !== "");
+}
+async function submitWaybill() {
+  const payload = {
+    waybill_no: $("wb-no").value.trim(),
+    batches: collectBatches($("wb-batches")),
+  };
+  const r = await fetch("/api/waybills", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  const data = await r.json();
+  if (!r.ok) return toast(formatErr(data), false);
+  toast(`原单 ${data.waybill_no} 已录入（${data.total_weight_kg} kg）`, true);
+  $("wb-no").value = ""; $("wb-batches").innerHTML = ""; addBatchRow("wb-batches");
+  refreshAll();
+}
+async function submitPackage() {
+  const oldNos = $("pkg-old").value.split("\n").map(s => s.trim()).filter(Boolean);
+  const newWaybills = [...$("pkg-news").querySelectorAll(".newblock")].map(blk => ({
+    waybill_no: blk.querySelector(".nno").value.trim(),
+    batches: collectBatches(blk.querySelector(".nb-batches")),
+  })).filter(w => w.waybill_no !== "");
+  const payload = {
+    package_no: $("pkg-no").value.trim(),
+    old_waybill_nos: oldNos,
+    new_waybills: newWaybills,
+  };
+  const r = await fetch("/api/packages", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  const data = await r.json();
+  if (!r.ok) return toast(formatErr(data), false);
+  const p = data.package;
+  toast(`包 ${p.package_no}：${statusText(p.status)}${data.replayed ? "（重传沿用原结果）" : ""}`,
+        p.status !== "rejected");
+  $("pkg-no").value = ""; $("pkg-old").value = ""; $("pkg-news").innerHTML = "";
+  addNewWaybill();
+  refreshAll();
+}
+function formatErr(data) {
+  if (Array.isArray(data.detail))
+    return data.detail.map(d => `${d.loc.join(".")}: ${d.msg}`).join("\n");
+  return data.detail || "请求失败";
+}
+function statusText(s) {
+  return { applied: "已生效", suspended: "挂起", rejected: "拒收" }[s] || s;
+}
+
+// ---------- 渲染 ----------
+async function refreshAll() {
+  try {
+    const [wb, pk, st] = await Promise.all([
+      fetch("/api/waybills").then(r => r.json()),
+      fetch("/api/packages").then(r => r.json()),
+      fetch("/api/stats").then(r => r.json()),
+    ]);
+    waybills = wb; packages = pk;
+    $("statline").textContent =
+      `有效单 ${st.active_waybills} 张 / 已替换 ${st.replaced_waybills} 张 / ` +
+      `有效货批总重 ${st.active_total_weight_kg} kg ｜ 改单包：生效 ${st.packages.applied}、` +
+      `挂起 ${st.packages.suspended}、拒收 ${st.packages.rejected}`;
+    renderWaybills(); renderPackages();
+  } catch (e) { toast("刷新失败：" + e, false); }
+}
+function renderWaybills() {
+  const f = $("wb-filter").value;
+  const rows = waybills.filter(w => !f || w.status === f).map(w => `
+    <tr>
+      <td><code>${esc(w.waybill_no)}</code></td>
+      <td><span class="badge b-${w.status}">${w.status === "active" ? "有效" : "已替换"}</span></td>
+      <td class="batches">${w.batches.map(b => `${esc(b.batch_no)}: ${b.weight_kg}kg`).join("<br>")}</td>
+      <td>${w.total_weight_kg}</td>
+      <td>${w.source_package_no ? esc(w.source_package_no) : '<span class="muted">原单</span>'}</td>
+      <td>${w.replaced_by_pkg ? esc(w.replaced_by_pkg) : ""}</td>
+    </tr>`).join("");
+  $("wb-tbody").innerHTML = rows ||
+    '<tr><td colspan="6" class="muted">暂无数据</td></tr>';
+}
+function renderPackages() {
+  const f = $("pkg-filter").value;
+  const rows = packages.filter(p => !f || p.status === f).map(p => `
+    <tr>
+      <td><code>${esc(p.package_no)}</code></td>
+      <td><span class="badge b-${p.status}">${statusText(p.status)}</span></td>
+      <td>${p.old_waybill_nos.map(esc).join("<br>")}</td>
+      <td>${p.new_waybills.map(w =>
+            `<b>${esc(w.waybill_no)}</b> <span class="muted">(` +
+            w.batches.map(b => `${esc(b.batch_no)}:${b.weight_kg}`).join(", ") + ")</span>"
+          ).join("<br>")}</td>
+      <td>${p.reason ? `<span class="reason">${esc(p.reason)}</span>`
+            : '<span class="muted">整包切换成功</span>'}</td>
+      <td><code title="${esc(p.content_hash)}">${esc(p.content_hash.slice(0, 10))}…</code></td>
+    </tr>`).join("");
+  $("pkg-tbody").innerHTML = rows ||
+    '<tr><td colspan="6" class="muted">暂无改单包</td></tr>';
+}
+function downloadCsv() { window.location = "/api/reconciliation.csv"; }
+
+// ---------- 初始化 ----------
+addBatchRow("wb-batches");
+addNewWaybill();
+refreshAll();
+setInterval(refreshAll, 5000);
+</script>
+</body>
+</html>
