@@ -85,6 +85,25 @@ def read_connection(db_path: str | None = None) -> Iterator[sqlite3.Connection]:
 
 
 @contextmanager
+def read_snapshot(db_path: str | None = None) -> Iterator[sqlite3.Connection]:
+    """只读快照事务：同一事务内的多次查询看到同一份已提交台账。
+
+    账单核对需要“整份账单按同一个台账状态核对”。显式 ``BEGIN`` 后，WAL
+    模式下后续所有 SELECT 共享同一个读快照；核对期间其他连接提交的改单包
+    不会让账单前半段与后半段落在不同状态上。
+    """
+    conn = _connect(db_path)
+    try:
+        conn.execute("BEGIN")
+        try:
+            yield conn
+        finally:
+            conn.rollback()
+    finally:
+        conn.close()
+
+
+@contextmanager
 def write_transaction(db_path: str | None = None) -> Iterator[sqlite3.Connection]:
     """串行化的写事务：先拿进程锁，再以 IMMEDIATE 立即获取写锁。"""
     with _write_lock:

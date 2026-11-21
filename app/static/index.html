@@ -43,6 +43,9 @@
   .b-active, .b-applied { background:#dcfce7; color:var(--green); }
   .b-replaced, .b-rejected { background:#fee2e2; color:var(--red); }
   .b-suspended { background:#fef3c7; color:var(--amber); }
+  .b-passed { background:#dcfce7; color:var(--green); }
+  .b-manual_review { background:#fef3c7; color:var(--amber); }
+  .b-suspected_duplicate { background:#ede9fe; color:#7c3aed; }
   .reason { color:var(--red); font-size:12px; margin-top:2px; }
   .muted { color:var(--muted); font-size:12px; }
   #toast { position:fixed; right:20px; bottom:20px; max-width:420px; padding:12px 16px;
@@ -56,6 +59,16 @@
               margin-bottom:10px; background:#fafbfc; }
   .newblock h3 { font-size:13px; margin:0 0 6px; display:flex; justify-content:space-between; }
   code { background:#f3f4f6; padding:1px 5px; border-radius:4px; font-size:12px; }
+  .trace { font-size:12px; color:#374151; line-height:1.6; }
+  .trace .arrow { color:var(--muted); }
+  .dupgroups { margin-top:12px; }
+  .dupgroups h3 { font-size:13px; margin:12px 0 6px; }
+  .summary { display:flex; gap:18px; flex-wrap:wrap; margin:8px 0 14px; font-size:13px; }
+  .summary b { font-size:18px; display:block; }
+  .summary .p b { color:var(--green); }
+  .summary .m b { color:var(--amber); }
+  .summary .d b { color:#7c3aed; }
+  #bill-empty { color:var(--muted); font-size:13px; }
 </style>
 </head>
 <body>
@@ -64,6 +77,7 @@
   <span class="stat" id="statline">加载中…</span>
   <span style="flex:1"></span>
   <button class="ghost" onclick="refreshAll()">刷新</button>
+  <button class="ghost" onclick="document.getElementById('bill-card').scrollIntoView({behavior:'smooth'})">账单核对</button>
   <button class="primary" onclick="downloadCsv()">下载对账 CSV（仅有效单）</button>
 </header>
 
@@ -129,6 +143,46 @@
         <th>内容指纹</th></tr></thead>
       <tbody id="pkg-tbody"></tbody>
     </table>
+  </section>
+  <!-- 承运方账单核对 -->
+  <section class="card full" id="bill-card">
+    <h2>⑤ 承运方月账单核对</h2>
+    <p class="muted" style="margin:0 0 10px">
+      上传 CSV（表头：运单号、货批号、计费公斤数；每行申报该运单货批的全重）。
+      整份账单按同一份已提交台账状态核对：可引用现行单或历史单，沿已生效拆并记录回追到原单货批。
+      查无单号/货批、计费重量不符、沿途拆并总重不等 → 待人工核实；多行回追到同一条原单货批 → 疑似重复，供财务退回核查。
+    </p>
+    <div class="toolbar">
+      <input type="file" id="bill-file" accept=".csv,text/csv" style="width:auto" />
+      <button class="primary" onclick="uploadBill()">上载并核对</button>
+      <button class="ghost" onclick="downloadSampleBill()">下载样例账单</button>
+      <span class="muted" id="bill-meta"></span>
+    </div>
+    <div id="bill-empty" class="muted">尚未上传账单。</div>
+    <div id="bill-result" style="display:none">
+      <div class="summary">
+        <div class="p"><b id="sum-passed">0</b>通过</div>
+        <div class="m"><b id="sum-manual">0</b>待人工核实</div>
+        <div class="d"><b id="sum-dup">0</b>疑似重复</div>
+        <div><b id="sum-total">0</b>账单行数</div>
+        <div><b id="sum-groups">0</b>重复组</div>
+      </div>
+      <div class="toolbar">
+        <select id="bill-filter" onchange="renderBillRows()">
+          <option value="">全部行</option>
+          <option value="manual_review">仅待人工核实</option>
+          <option value="suspected_duplicate">仅疑似重复</option>
+          <option value="passed">仅通过</option>
+        </select>
+        <span class="muted">台账快照指纹：<code id="bill-token"></code></span>
+      </div>
+      <table>
+        <thead><tr><th>账单行号</th><th>运单号</th><th>货批号</th><th>计费kg</th>
+          <th>台账kg</th><th>结论 / 原因</th><th>原单货批</th><th>追溯路径</th></tr></thead>
+        <tbody id="bill-tbody"></tbody>
+      </table>
+      <div class="dupgroups" id="bill-dups"></div>
+    </div>
   </section>
 </main>
 
@@ -280,6 +334,118 @@ function renderPackages() {
     '<tr><td colspan="6" class="muted">暂无改单包</td></tr>';
 }
 function downloadCsv() { window.location = "/api/reconciliation.csv"; }
+
+// ---------- 账单核对 ----------
+let billResult = null;
+const BILL_STATUS_TEXT = {
+  passed: "通过",
+  manual_review: "待人工核实",
+  suspected_duplicate: "疑似重复",
+};
+
+async function uploadBill() {
+  const input = $("bill-file");
+  if (!input.files.length) return toast("请先选择 CSV 文件", false);
+  const fd = new FormData();
+  fd.append("file", input.files[0]);
+  let r, data;
+  try {
+    r = await fetch("/api/bill-checks", { method: "POST", body: fd });
+    try { data = await r.json(); } catch (e) { data = { detail: "响应不是有效 JSON" }; }
+  } catch (e) {
+    return toast("上载失败：" + e, false);
+  }
+  if (!r.ok) {
+    // 格式错误不覆盖上一份结果，便于对照
+    return toast(formatErr(data), false);
+  }
+  billResult = data;
+  $("bill-empty").style.display = "none";
+  $("bill-result").style.display = "block";
+  $("bill-filter").value = "";
+  renderBill();
+  const s = data.summary;
+  toast(`核对完成：通过 ${s.passed}、待核实 ${s.manual_review}、疑似重复 ${s.suspected_duplicate}`, true);
+}
+function downloadSampleBill() { window.location = "/api/bill-checks/sample.csv"; }
+
+function renderBill() {
+  const d = billResult, s = d.summary;
+  $("sum-passed").textContent = s.passed;
+  $("sum-manual").textContent = s.manual_review;
+  $("sum-dup").textContent = s.suspected_duplicate;
+  $("sum-total").textContent = s.total;
+  $("sum-groups").textContent = s.duplicate_groups;
+  $("bill-token").textContent = d.ledger_state.token.slice(0, 16) + "…";
+  $("bill-token").title =
+    `运单 ${d.ledger_state.waybill_count} 张（有效 ${d.ledger_state.active_waybill_count}）` +
+    `，货批 ${d.ledger_state.batch_count} 条，改单包 ${d.ledger_state.package_count} 个` +
+    `（已生效 ${d.ledger_state.applied_package_count}）` +
+    `\n核对时间：${d.checked_at}${d.filename ? "\n文件：" + d.filename : ""}`;
+  $("bill-meta").textContent =
+    `${d.filename || "已上传"} ｜ 核对于 ${d.checked_at} ｜ 台账快照 ${d.ledger_state.token.slice(0, 10)}…`;
+  renderBillRows();
+  renderBillDuplicates();
+}
+function renderBillRows() {
+  if (!billResult) return;
+  const f = $("bill-filter").value;
+  const tbody = $("bill-tbody");
+  const rows = billResult.rows.filter(r => !f || r.status === f);
+  tbody.innerHTML = rows.map(r => {
+    let conclusion = `<span class="badge b-${r.status}">${BILL_STATUS_TEXT[r.status] || esc(r.status)}</span>`;
+    if (r.reasons.length)
+      conclusion += `<div class="reason">${r.reasons.map(esc).join("<br>")}</div>`;
+    if (r.status === "suspected_duplicate") {
+      const others = r.duplicate_with.map(o =>
+        `#${o.line_no}（${esc(o.waybill_no)}/${esc(o.batch_no)}）`).join("、");
+      const origins = r.shared_original_batches.map(b =>
+        `${esc(b.waybill_no)}/${esc(b.batch_no)}`).join("、");
+      conclusion += `<div class="reason" style="color:#7c3aed">与账单行 ${others} ` +
+        `共同覆盖原单货批 ${origins}，请退回核查</div>`;
+    }
+    const origin = r.original_batch
+      ? `${esc(r.original_batch.waybill_no)}/${esc(r.original_batch.batch_no)}` +
+        ` <span class="muted">(${r.original_batch.weight_kg}kg)</span>`
+      : '<span class="muted">—</span>';
+    const trace = r.trace.length > 1
+      ? `<span class="trace">${r.trace.map(t =>
+            `${esc(t.waybill_no)}/${esc(t.batch_no)}` +
+            (t.via_package_no ? ` <span class="muted">←${esc(t.via_package_no)}</span>` : ""))
+          .join(' <span class="arrow">→</span> ')}</span>`
+      : '<span class="muted">原单/直连</span>';
+    const statusNote = r.waybill_status === "replaced"
+      ? ' <span class="muted">(历史单)</span>' : "";
+    return `<tr>
+      <td>#${r.line_no}</td>
+      <td><code>${esc(r.waybill_no)}</code>${statusNote}</td>
+      <td><code>${esc(r.batch_no)}</code></td>
+      <td>${esc(r.billed_weight_kg)}</td>
+      <td>${r.ledger_weight_kg == null ? '<span class="muted">—</span>' : r.ledger_weight_kg}</td>
+      <td>${conclusion}</td>
+      <td>${origin}</td>
+      <td>${trace}</td>
+    </tr>`;
+  }).join("");
+  tbody.innerHTML = tbody.innerHTML ||
+    '<tr><td colspan="8" class="muted">没有符合筛选条件的行</td></tr>';
+}
+function renderBillDuplicates() {
+  if (!billResult) return;
+  const groups = billResult.duplicate_groups;
+  const box = $("bill-dups");
+  if (!groups.length) {
+    box.innerHTML = '<p class="muted">没有发现共同覆盖同一条原单货批的重复申报。</p>';
+    return;
+  }
+  box.innerHTML = "<h3>疑似重复分组（供财务退回核查）</h3>" +
+    groups.map(g => `
+      <p class="muted">
+        共同原单货批 <code>${esc(g.original_waybill_no)}/${esc(g.original_batch_no)}</code>
+        (${g.weight_kg}kg) 被账单行 ${g.line_numbers.map(n => "#" + n).join("、")} 各自计费：
+        ${g.rows.map(r => `#${r.line_no} ${esc(r.waybill_no)}/${esc(r.batch_no)} ${esc(r.billed_weight_kg)}kg`).join("；")}
+      </p>`).join("");
+}
 
 // ---------- 初始化 ----------
 addBatchRow("wb-batches");
